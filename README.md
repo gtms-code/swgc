@@ -90,6 +90,6 @@ wireguard.sys (カーネル)
 
 ## ライセンス
 
-本プロジェクトのソースコード: MIT License
+本プロジェクト (ソースコード・同梱の `wireguard.dll` を含む全体): **GNU General Public License v2.0**
 
-同梱の `wireguard.dll` (wireguard-nt): [GPLv2](https://git.zx2c4.com/wireguard-nt/about/COPYING) — Copyright © WireGuard LLC
+`wireguard.dll` は [wireguard-nt](https://git.zx2c4.com/wireguard-nt) のビルド済みバイナリです (Copyright © WireGuard LLC, GPLv2)。wireguard-nt が GPLv2 only のため、本プロジェクト全体も GPLv2 で頒布しています。
