@@ -7,10 +7,18 @@
 //!   blob, a different user account (or the same account on a different machine)
 //!   cannot call `decrypt()` successfully.
 //!
-//! - **Application entropy**: A 25-byte constant is passed as DPAPI's optional
-//!   entropy parameter.  This means that even another process running as the same
-//!   user cannot decrypt the blob unless it knows this constant — an extra layer
-//!   of defense against rogue processes on the same desktop session.
+//! - **Application entropy**: A 25-byte constant (`ENTROPY`) is passed as
+//!   DPAPI's optional entropy parameter.  Its purpose is **application scoping**:
+//!   other applications that call `CryptUnprotectData` on our registry blob
+//!   without supplying this exact value will receive a decryption error.
+//!
+//!   **Important limitation**: this constant is NOT a secret.  It is visible in
+//!   the source code, on GitHub, and extractable from the binary with `strings`.
+//!   A process running as the same user that supplies this constant can decrypt
+//!   the blob just as SWGC does.  The real security boundary is the DPAPI
+//!   user-session binding described above — a different Windows user account or
+//!   the same account on a different machine cannot decrypt even knowing this
+//!   constant.  The entropy provides namespace isolation, not process isolation.
 //!
 //! - **No plaintext on disk**: `encrypt` and `decrypt` operate entirely in RAM.
 //!   The caller is responsible for zeroizing sensitive inputs after the call.
@@ -26,7 +34,13 @@ mod dpapi {
     use winapi::um::wincrypt::DATA_BLOB;
 
     /// Application-specific entropy mixed into every DPAPI call.
-    /// Changing this string would invalidate all stored blobs.
+    ///
+    /// Purpose: namespace isolation — other apps calling CryptUnprotectData on
+    /// our registry blob without this exact value will fail.  This is NOT a
+    /// secret; it is visible in the binary and source code.  See module doc.
+    ///
+    /// Changing this string would invalidate all stored blobs (users would need
+    /// to re-import their WireGuard configuration).
     const ENTROPY: &[u8] = b"swgc-wireguard-config-v1\0";
 
     fn make_blob(data: &[u8]) -> DATA_BLOB {

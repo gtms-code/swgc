@@ -22,12 +22,48 @@
 use crate::config::WgConfig;
 use crate::error::{AppError, Result};
 use std::sync::Mutex;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 // ── State ─────────────────────────────────────────────────────────────────
 
+/// Wrapper around the raw wireguard-nt adapter handle (`*mut c_void`).
+///
+/// # Module-level safety invariant
+///
+/// **Every** read or write of the inner pointer must occur while `TUNNEL`
+/// (the module-level `Mutex<Option<TunnelState>>`) is held.  All functions
+/// in this module that access the adapter handle acquire the lock, use the
+/// handle, and release the lock before returning.  The Rust compiler cannot
+/// verify this invariant mechanically — it is upheld by code convention and
+/// must be checked during code review.
+///
+/// # Why `unsafe impl Send`?
+///
+/// Raw pointers are `!Send` by default because the compiler cannot prove they
+/// are safe to transfer across thread boundaries.  `AdapterHandle` is `Send`
+/// because the invariant above guarantees that only one thread ever accesses
+/// the handle at a time (the Mutex serialises all access), making concurrent
+/// use impossible in practice even though the Windows kernel handle itself is
+/// not intrinsically thread-safe.
+struct AdapterHandle(*mut std::ffi::c_void);
+
+// SAFETY: exclusive access is enforced by the TUNNEL Mutex; see AdapterHandle doc.
+unsafe impl Send for AdapterHandle {}
+
+impl AdapterHandle {
+    /// Return the raw handle pointer for passing to WireGuard FFI functions.
+    ///
+    /// # Precondition
+    ///
+    /// The caller MUST hold the `TUNNEL` lock (i.e., call this only from within
+    /// a `TUNNEL.lock()` guard scope).
+    fn raw(&self) -> *mut std::ffi::c_void {
+        self.0
+    }
+}
+
 struct TunnelState {
-    adapter: *mut std::ffi::c_void,
+    adapter: AdapterHandle,
     /// libloading Library — must be kept alive while adapter handle is live.
     _lib: libloading::Library,
     #[allow(dead_code)]
@@ -35,9 +71,12 @@ struct TunnelState {
     /// Signal for the background monitor thread to stop (set true on disconnect).
     monitor_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
-
-// SAFETY: the raw adapter handle is only accessed while holding the Mutex.
-unsafe impl Send for TunnelState {}
+// No manual `unsafe impl Send for TunnelState` needed.
+// All fields implement Send:
+//   AdapterHandle  — unsafe impl Send (see above; invariant enforced by TUNNEL Mutex)
+//   libloading::Library — Send + Sync (libloading guarantees this)
+//   String         — Send + Sync
+//   Arc<AtomicBool>— Send + Sync
 
 static TUNNEL: Mutex<Option<TunnelState>> = Mutex::new(None);
 
@@ -408,6 +447,30 @@ use crate::wg_nt::*;
 fn parse_endpoint(endpoint: &str) -> Result<SOCKADDR_INET> {
     use std::net::{SocketAddr, ToSocketAddrs};
 
+    // If the host part is a hostname (not a numeric IP), DNS resolution will be
+    // used.  Warn about the security implications:
+    //
+    // - DNS spoofing / poisoned resolver / local hosts-file overrides can redirect
+    //   the connection to a wrong server.
+    // - WireGuard's public-key authentication prevents impersonation: a spoofed
+    //   endpoint lacks the peer's private key, so the handshake will fail and no
+    //   traffic will flow through the attacker's machine.
+    // - However, the client's IP address IS disclosed to whichever server it
+    //   connects to before the handshake fails.
+    //
+    // Recommendation: use a numeric IP address in the Endpoint field of .conf.
+    if let Some(host) = endpoint.split(':').next() {
+        if host.parse::<std::net::IpAddr>().is_err() {
+            diag!(
+                "  ⚠ エンドポイント {:?} はIPアドレスではなくホスト名です。DNS解決を行います。\
+                セキュリティのため .conf の Endpoint には固定IPアドレスの使用を推奨します。\
+                (DNS詐称が発生しても WireGuard の公開鍵認証により接続先の詐称は防がれますが、\
+                接続失敗やクライアントIPの開示が起きる可能性があります)",
+                host
+            );
+        }
+    }
+
     let addrs: Vec<SocketAddr> = endpoint
         .to_socket_addrs()
         .map_err(|e| AppError::WireGuard(format!("エンドポイント解決失敗 ({endpoint}): {e}")))?
@@ -535,8 +598,14 @@ fn connect_with_stop(
 
     // ── 1. Decode keys ───────────────────────────────────────────────────
     diag!("step 1: decoding keys");
-    let mut private_key = decode_key(&config.private_key)
-        .map_err(|e| { diag!("  PrivateKey decode error: {e}"); e })?;
+    // Wrap decoded key material in Zeroizing<> so the heap/stack bytes are
+    // automatically zeroed when the variable goes out of scope — including on
+    // panic.  Explicit .zeroize() calls later are kept for "belt-and-suspenders"
+    // early zeroing as soon as the material is no longer needed.
+    let mut private_key = Zeroizing::new(
+        decode_key(&config.private_key)
+            .map_err(|e| { diag!("  PrivateKey decode error: {e}"); e })?
+    );
     diag!("  PrivateKey decoded OK");
 
     let peer_pub = decode_key(&config.peer_public_key)
@@ -544,14 +613,14 @@ fn connect_with_stop(
     diag!("  PeerPublicKey decoded OK");
 
     let has_psk = config.preshared_key.is_some();
-    let psk = if let Some(ref k) = config.preshared_key {
+    let psk = Zeroizing::new(if let Some(ref k) = config.preshared_key {
         let r = decode_key(k).map_err(|e| { diag!("  PSK decode error: {e}"); e })?;
         diag!("  PSK decoded OK");
         r
     } else {
         diag!("  no PSK");
         [0u8; 32]
-    };
+    });
 
     let endpoint = parse_endpoint(&config.endpoint)
         .map_err(|e| { diag!("  endpoint parse error: {e}"); e })?;
@@ -625,7 +694,8 @@ fn connect_with_stop(
     let mut iface: WIREGUARD_INTERFACE = unsafe { std::mem::zeroed() };
     iface.Flags      = WIREGUARD_INTERFACE_FLAG_HAS_PRIVATE_KEY
                      | WIREGUARD_INTERFACE_FLAG_REPLACE_PEERS;
-    iface.PrivateKey = private_key;
+    // Deref Zeroizing<[u8;32]> to copy the key bytes into the C struct.
+    iface.PrivateKey = *private_key;
     iface.PeersCount = 1;
     diag!("  iface.Flags=0x{:08x} PeersCount={}", iface.Flags, iface.PeersCount);
 
@@ -639,7 +709,7 @@ fn connect_with_stop(
 
     if has_psk {
         peer.Flags |= WIREGUARD_PEER_FLAG_HAS_PRESHARED_KEY;
-        peer.PresharedKey = psk;
+        peer.PresharedKey = *psk;
     }
     if keepalive > 0 {
         peer.Flags |= WIREGUARD_PEER_FLAG_HAS_PERSISTENT_KEEPALIVE;
@@ -648,7 +718,10 @@ fn connect_with_stop(
     diag!("  peer.Flags=0x{:08x} AllowedIPsCount={} Keepalive={}",
         peer.Flags, peer.AllowedIPsCount, peer.PersistentKeepalive);
 
-    let mut buf: Vec<u8> = vec![0u8; total];
+    // Use Zeroizing<Vec<u8>> so the buffer — which contains the private key
+    // and PSK in the first (iface_size + peer_size) bytes — is guaranteed to be
+    // zeroed even if a panic unwinds the stack before the explicit zeroize calls.
+    let mut buf = Zeroizing::new(vec![0u8; total]);
     unsafe {
         std::ptr::copy_nonoverlapping(
             &iface as *const WIREGUARD_INTERFACE as *const u8,
@@ -663,6 +736,12 @@ fn connect_with_stop(
                 aip_size);
         }
     }
+
+    // Zero key material from the stack-allocated C structs immediately after
+    // copying to buf.  This narrows the window during which key bytes live in
+    // multiple locations simultaneously (iface, peer, and buf).
+    iface.PrivateKey.zeroize();
+    peer.PresharedKey.zeroize();
 
     // Full hex dump for verification — debug builds only.
     // These buffers contain the private key and PSK in plaintext; never log them
@@ -887,7 +966,7 @@ fn connect_with_stop(
     // The monitor_stop Arc is provided by the caller (connect() or reconnect_for_monitor).
     // We intentionally do NOT spawn a new monitor thread here — the caller handles that.
     *guard = Some(TunnelState {
-        adapter,
+        adapter: AdapterHandle(adapter),
         _lib: lib,
         interface_name: "SWGC".into(),
         monitor_stop,
@@ -935,12 +1014,12 @@ fn reconnect_for_monitor(
                 if let Ok(f) = old._lib.get::<FnWireGuardSetAdapterState>(
                     b"WireGuardSetAdapterState\0")
                 {
-                    f(old.adapter, WIREGUARD_ADAPTER_STATE_DOWN);
+                    f(old.adapter.raw(), WIREGUARD_ADAPTER_STATE_DOWN);
                 }
                 if let Ok(f) = old._lib.get::<FnWireGuardCloseAdapter>(
                     b"WireGuardCloseAdapter\0")
                 {
-                    f(old.adapter);
+                    f(old.adapter.raw());
                 }
             }
             // old._lib dropped here (DLL ref-count decremented)
@@ -972,12 +1051,12 @@ pub fn disconnect() -> Result<()> {
         if let Ok(set_state) = state._lib.get::<FnWireGuardSetAdapterState>(
             b"WireGuardSetAdapterState\0",
         ) {
-            set_state(state.adapter, WIREGUARD_ADAPTER_STATE_DOWN);
+            set_state(state.adapter.raw(), WIREGUARD_ADAPTER_STATE_DOWN);
         }
         if let Ok(close) = state._lib.get::<FnWireGuardCloseAdapter>(
             b"WireGuardCloseAdapter\0",
         ) {
-            close(state.adapter);
+            close(state.adapter.raw());
         }
     }
 
@@ -1025,7 +1104,7 @@ pub fn get_tunnel_stats() -> Result<Option<TunnelStats>> {
         // Pass Bytes = 0 → driver returns FALSE + ERROR_MORE_DATA and sets
         // *Bytes to the number of bytes needed.
         let mut bytes: DWORD = 0;
-        fn_get_cfg(state.adapter, std::ptr::null_mut(), &mut bytes);
+        fn_get_cfg(state.adapter.raw(), std::ptr::null_mut(), &mut bytes);
         // Ignore return value (always FALSE here); bytes now holds required size.
 
         if bytes == 0 {
@@ -1036,7 +1115,7 @@ pub fn get_tunnel_stats() -> Result<Option<TunnelStats>> {
         // ── Second call: get the actual configuration ─────────────────────
         let mut buf: Vec<u8> = vec![0u8; bytes as usize];
         let mut bytes2 = bytes;
-        let ok = fn_get_cfg(state.adapter, buf.as_mut_ptr() as *mut _, &mut bytes2);
+        let ok = fn_get_cfg(state.adapter.raw(), buf.as_mut_ptr() as *mut _, &mut bytes2);
         if ok == 0 {
             let e = std::io::Error::last_os_error();
             return Err(AppError::WireGuard(format!(
