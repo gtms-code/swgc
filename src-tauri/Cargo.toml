@@ -21,6 +21,7 @@ serde_json = "1"
 thiserror = "2"
 log = "0.4"
 zeroize = { version = "1", features = ["derive"] }
+base64 = "0.22"
 
 # Windows-only: DPAPI + Registry + WireGuard
 [target.'cfg(windows)'.dependencies]

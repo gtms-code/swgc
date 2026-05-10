@@ -55,6 +55,18 @@ pub async fn get_status() -> Result<StatusResponse, AppError> {
 /// to the frontend.
 #[command]
 pub async fn import_config(file_path: String) -> Result<(), AppError> {
+    // Reject suspiciously large files before reading them into memory.
+    // A valid WireGuard .conf file is never larger than a few hundred bytes.
+    const MAX_CONF_BYTES: u64 = 65_536; // 64 KiB
+    let meta = fs::metadata(&file_path)
+        .map_err(|e| AppError::Config(format!("ファイル情報取得エラー: {e}")))?;
+    if meta.len() > MAX_CONF_BYTES {
+        return Err(AppError::Config(format!(
+            "ファイルが大きすぎます ({} bytes)。WireGuard設定ファイルは通常数百バイト以下です。",
+            meta.len()
+        )));
+    }
+
     // Read the .conf file. `content` is a heap-allocated String containing
     // the plaintext private key.
     let mut content = fs::read_to_string(&file_path)

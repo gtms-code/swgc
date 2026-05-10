@@ -277,59 +277,23 @@ macro_rules! diag {
 
 // ── Key decoding ──────────────────────────────────────────────────────────
 
+/// Decode a WireGuard key from standard Base64 (RFC 4648) and return the
+/// 32-byte raw key material.  Uses the `base64` crate rather than a hand-
+/// rolled decoder to avoid subtle correctness issues.
 fn decode_key(b64: &str) -> Result<[u8; 32]> {
-    // WireGuard keys are standard base64, always 44 chars (32 bytes + padding)
-    let bytes = base64_decode(b64)?;
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|e| AppError::WireGuard(format!("鍵のBase64デコード失敗: {e}")))?;
     if bytes.len() != 32 {
         return Err(AppError::WireGuard(format!(
-            "鍵長が不正: {} bytes (期待: 32)", bytes.len()
+            "鍵長が不正: {} bytes (期待: 32)",
+            bytes.len()
         )));
     }
     let mut key = [0u8; 32];
     key.copy_from_slice(&bytes);
     Ok(key)
-}
-
-/// Minimal Base64 decoder (RFC 4648 standard alphabet, with padding).
-fn base64_decode(input: &str) -> Result<Vec<u8>> {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut lookup = [0xFFu8; 256];
-    for (i, &c) in TABLE.iter().enumerate() {
-        lookup[c as usize] = i as u8;
-    }
-
-    let input = input.trim_end_matches('=');
-    let mut out = Vec::with_capacity(input.len() * 3 / 4);
-    let bytes = input.as_bytes();
-    let mut i = 0;
-    while i + 3 < bytes.len() {
-        let [a, b, c, d] = [
-            lookup[bytes[i] as usize],
-            lookup[bytes[i+1] as usize],
-            lookup[bytes[i+2] as usize],
-            lookup[bytes[i+3] as usize],
-        ];
-        if a == 0xFF || b == 0xFF || c == 0xFF || d == 0xFF {
-            return Err(AppError::WireGuard("鍵のBase64デコード失敗".into()));
-        }
-        out.push((a << 2) | (b >> 4));
-        out.push((b << 4) | (c >> 2));
-        out.push((c << 6) | d);
-        i += 4;
-    }
-    // Remainder
-    if i + 1 < bytes.len() {
-        let a = lookup[bytes[i] as usize];
-        let b = lookup[bytes[i+1] as usize];
-        if a == 0xFF || b == 0xFF { return Err(AppError::WireGuard("鍵のBase64デコード失敗".into())); }
-        out.push((a << 2) | (b >> 4));
-        if i + 2 < bytes.len() {
-            let c = lookup[bytes[i+2] as usize];
-            if c == 0xFF { return Err(AppError::WireGuard("鍵のBase64デコード失敗".into())); }
-            out.push((b << 4) | (c >> 2));
-        }
-    }
-    Ok(out)
 }
 
 // ── Endpoint parsing ──────────────────────────────────────────────────────
@@ -470,11 +434,11 @@ fn connect_with_stop(
     diag!("step 1: decoding keys");
     let mut private_key = decode_key(&config.private_key)
         .map_err(|e| { diag!("  PrivateKey decode error: {e}"); e })?;
-    diag!("  PrivateKey decoded OK (first byte: {:02x})", private_key[0]);
+    diag!("  PrivateKey decoded OK");
 
     let peer_pub = decode_key(&config.peer_public_key)
         .map_err(|e| { diag!("  PeerPublicKey decode error: {e}"); e })?;
-    diag!("  PeerPublicKey decoded OK (first byte: {:02x})", peer_pub[0]);
+    diag!("  PeerPublicKey decoded OK");
 
     let has_psk = config.preshared_key.is_some();
     let psk = if let Some(ref k) = config.preshared_key {
@@ -597,7 +561,10 @@ fn connect_with_stop(
         }
     }
 
-    // Full hex dump for verification (INTERFACE + PEER + AllowedIPs)
+    // Full hex dump for verification — debug builds only.
+    // These buffers contain the private key and PSK in plaintext; never log them
+    // in release builds.
+    #[cfg(debug_assertions)]
     {
         let hex_iface: String = buf[..iface_size].iter().map(|b| format!("{b:02x} ")).collect();
         diag!("  WIREGUARD_INTERFACE[0..{iface_size}]: {hex_iface}");
@@ -609,20 +576,13 @@ fn connect_with_stop(
         // Decode peer fields for readability
         let p = &buf[iface_size..];
         let flags_p = u32::from_le_bytes([p[0],p[1],p[2],p[3]]);
-        // PublicKey at offset 8..40
-        let pk_first = p[8];
-        let pk_last  = p[39];
-        // PSK at offset 40..72
-        let psk_first = p[40];
-        let psk_last  = p[71];
         // PersistentKeepalive at offset 72..74
         let ka = u16::from_le_bytes([p[72],p[73]]);
         // Endpoint at offset 76: family(2)+port(2)+addr(4) for IPv4
         let ep_family = u16::from_le_bytes([p[76],p[77]]);
         let ep_port_be = u16::from_be_bytes([p[78],p[79]]);
         let ep_ip = &p[80..84];
-        diag!("  peer.Flags=0x{flags_p:08x} PK[0]={pk_first:02x} PK[31]={pk_last:02x}");
-        diag!("  peer.PSK[0]={psk_first:02x} PSK[31]={psk_last:02x} Keepalive={ka}");
+        diag!("  peer.Flags=0x{flags_p:08x} Keepalive={ka}");
         diag!("  peer.Endpoint: family={ep_family} port={ep_port_be} ip={}.{}.{}.{}",
             ep_ip[0], ep_ip[1], ep_ip[2], ep_ip[3]);
 
