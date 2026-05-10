@@ -2,6 +2,12 @@
 # WireGuard .conf files contain private keys — NEVER commit these.
 *.conf
 
+# ── Third-party binaries ──────────────────────────────────────────────────
+# wireguard.dll (wireguard-nt) is NOT distributed in this repository.
+# Users must obtain it by installing WireGuard for Windows (wireguard.com/install/).
+# Excluding all DLLs prevents accidental commits of unverified binaries.
+*.dll
+
 # ── Build artifacts ───────────────────────────────────────────────────────
 # Rust/Tauri
 src-tauri/target/
