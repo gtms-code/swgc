@@ -22,6 +22,8 @@ thiserror = "2"
 log = "0.4"
 zeroize = { version = "1", features = ["derive"] }
 base64 = "0.22"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+sha2 = "0.10"
 
 # Windows-only: DPAPI + Registry + WireGuard
 [target.'cfg(windows)'.dependencies]

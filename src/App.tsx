@@ -1,5 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getStatus, importConfig, connect, disconnect, deleteConfig, getTunnelStats, forceReconnect } from "./commands";
+import {
+  getStatus,
+  selectConfFile,
+  importConfig,
+  connect,
+  disconnect,
+  deleteConfig,
+  getTunnelStats,
+  forceReconnect,
+} from "./commands";
 import type { AppState } from "./types";
 
 // ── Byte formatter ────────────────────────────────────────────────────────
@@ -14,9 +23,8 @@ function formatBytes(n: number): string {
 /** Convert Windows FILETIME (100-ns since 1601-01-01) → JS Date, or null if 0. */
 function filetimeToDate(ft: number): Date | null {
   if (ft === 0) return null;
-  // FILETIME epoch offset in milliseconds: (1970-01-01) - (1601-01-01) = 11644473600000 ms
   const epochDiffMs = 11644473600000;
-  const ms = ft / 10000 - epochDiffMs; // 100-ns → ms, subtract epoch diff
+  const ms = ft / 10000 - epochDiffMs;
   return new Date(ms);
 }
 
@@ -29,7 +37,6 @@ function formatHandshake(ft: number): string {
   return `${Math.floor(sec / 3600)}時間前`;
 }
 
-/** 最後のハンドシェイクからの経過秒。ft=0 なら Infinity。 */
 function handshakeAgeSec(ft: number): number {
   const d = filetimeToDate(ft);
   if (!d) return Infinity;
@@ -62,6 +69,27 @@ function useElapsedTime(startMs: number | undefined): string {
   return elapsed;
 }
 
+// ── Passphrase dialog state ───────────────────────────────────────────────
+
+type PhraseFlow = "import" | "connect" | "reconnect";
+
+interface PhraseDialog {
+  open: boolean;
+  flow: PhraseFlow | null;
+  /** File path selected for import — null for connect/reconnect flows. */
+  filePath: string | null;
+  value: string;
+  error: string | null;
+}
+
+const PHRASE_CLOSED: PhraseDialog = {
+  open: false,
+  flow: null,
+  filePath: null,
+  value: "",
+  error: null,
+};
+
 // ── App ───────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -70,6 +98,7 @@ export default function App() {
     hasConfig: false,
   });
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [phraseDialog, setPhraseDialog] = useState<PhraseDialog>(PHRASE_CLOSED);
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const elapsed = useElapsedTime(state.connectedAt);
 
@@ -80,7 +109,7 @@ export default function App() {
     setState((prev) => ({ ...prev, errorMessage: msg }));
     errorTimerRef.current = setTimeout(() => {
       setState((prev) => ({ ...prev, errorMessage: undefined }));
-    }, 6000);
+    }, 8000);
   }, []);
 
   // ── Status polling ──────────────────────────────────────────────────────
@@ -100,12 +129,10 @@ export default function App() {
         status: nowConnected ? "connected" : "disconnected",
         peerEndpoint: result.peer_endpoint,
         connectedAt,
-        // clear stats when disconnected
         tunnelStats: nowConnected ? prev.tunnelStats : undefined,
       };
     });
 
-    // Poll tunnel stats only while connected
     if (result.is_connected) {
       const stats = await getTunnelStats();
       if (stats) {
@@ -120,28 +147,65 @@ export default function App() {
     return () => clearInterval(id);
   }, [refreshStatus]);
 
-  // ── Handlers ────────────────────────────────────────────────────────────
+  // ── Passphrase dialog helpers ───────────────────────────────────────────
 
-  const handleImport = async () => {
+  const closePhraseDialog = useCallback(() => {
+    setPhraseDialog(PHRASE_CLOSED);
+  }, []);
+
+  /** Called when the user confirms the passphrase dialog. */
+  const handlePhraseConfirm = useCallback(async () => {
+    const { flow, filePath, value: passphrase } = phraseDialog;
+
+    if (!passphrase) {
+      setPhraseDialog((prev) => ({ ...prev, error: "パスフレーズを入力してください" }));
+      return;
+    }
+
+    // Close dialog and clear passphrase from React state before any async work.
+    setPhraseDialog(PHRASE_CLOSED);
+
     try {
-      const ok = await importConfig();
-      if (ok) {
+      if (flow === "import" && filePath) {
+        await importConfig(filePath, passphrase);
         setState((prev) => ({ ...prev, hasConfig: true, errorMessage: undefined }));
+      } else if (flow === "connect") {
+        setState((prev) => ({ ...prev, status: "connecting", errorMessage: undefined }));
+        await connect(passphrase);
+        setState((prev) => ({ ...prev, status: "connected", connectedAt: Date.now() }));
+      } else if (flow === "reconnect") {
+        setState((prev) => ({ ...prev, status: "connecting", errorMessage: undefined }));
+        await forceReconnect(passphrase);
+        setState((prev) => ({ ...prev, status: "connected", connectedAt: Date.now() }));
       }
     } catch (err) {
-      setError(`インポートエラー: ${err}`);
+      if (flow === "connect" || flow === "reconnect") {
+        setState((prev) => ({ ...prev, status: "disconnected" }));
+      }
+      const prefix =
+        flow === "import"    ? "インポートエラー" :
+        flow === "connect"   ? "接続エラー" :
+        "再接続エラー";
+      setError(`${prefix}: ${err}`);
+    }
+  }, [phraseDialog, setError]);
+
+  // ── Button handlers ─────────────────────────────────────────────────────
+
+  /** Step 1 of import: pick file, then open passphrase dialog. */
+  const handleImport = async () => {
+    try {
+      const filePath = await selectConfFile();
+      if (!filePath) return; // user cancelled file picker
+      setPhraseDialog({ open: true, flow: "import", filePath, value: "", error: null });
+    } catch (err) {
+      setError(`ファイル選択エラー: ${err}`);
     }
   };
 
-  const handleConnect = async () => {
-    setState((prev) => ({ ...prev, status: "connecting", errorMessage: undefined }));
-    try {
-      await connect();
-      setState((prev) => ({ ...prev, status: "connected", connectedAt: Date.now() }));
-    } catch (err) {
-      setState((prev) => ({ ...prev, status: "disconnected" }));
-      setError(`接続エラー: ${err}`);
-    }
+  /** Open passphrase dialog for connect. */
+  const handleConnect = () => {
+    setPhraseDialog({ open: true, flow: "connect", filePath: null, value: "", error: null });
   };
 
   const handleDisconnect = async () => {
@@ -155,15 +219,9 @@ export default function App() {
     }
   };
 
-  const handleForceReconnect = async () => {
-    setState((prev) => ({ ...prev, status: "connecting", errorMessage: undefined }));
-    try {
-      await forceReconnect();
-      setState((prev) => ({ ...prev, status: "connected", connectedAt: Date.now() }));
-    } catch (err) {
-      setState((prev) => ({ ...prev, status: "disconnected" }));
-      setError(`再接続エラー: ${err}`);
-    }
+  /** Open passphrase dialog for force-reconnect. */
+  const handleForceReconnect = () => {
+    setPhraseDialog({ open: true, flow: "reconnect", filePath: null, value: "", error: null });
   };
 
   const handleDeleteConfig = async () => {
@@ -187,10 +245,9 @@ export default function App() {
   const isConnecting  = state.status === "connecting" || state.status === "disconnecting";
   const isBusy        = isConnecting;
 
-  // Stale session: last handshake is too old (WireGuard sessions expire ~5.5 min after re-key)
-  const hsAge = state.tunnelStats ? handshakeAgeSec(state.tunnelStats.last_handshake) : 0;
-  const isStale     = isConnected && !!state.tunnelStats && hsAge > 180;  // >3 min: warn
-  const isVeryStale = isConnected && !!state.tunnelStats && hsAge > 330;  // >5.5 min: urgent
+  const hsAge     = state.tunnelStats ? handshakeAgeSec(state.tunnelStats.last_handshake) : 0;
+  const isStale   = isConnected && !!state.tunnelStats && hsAge > 180;
+  const isVeryStale = isConnected && !!state.tunnelStats && hsAge > 330;
 
   const statusLabel =
     state.status === "connected"     ? (isVeryStale ? "セッション期限切れ" : isStale ? "接続中 (セッション古い)" : "接続中") :
@@ -362,8 +419,55 @@ export default function App() {
 
       {/* Footer */}
       <div className="footer">
-        秘密鍵は Windows DPAPI で暗号化 — ディスクへの平文保存なし
+        秘密鍵は Windows DPAPI + パスフレーズで保護 — ディスクへの平文保存なし
       </div>
+
+      {/* Passphrase dialog overlay */}
+      {phraseDialog.open && (
+        <div
+          className="passphrase-overlay"
+          onClick={(e) => { if (e.target === e.currentTarget) closePhraseDialog(); }}
+        >
+          <div className="passphrase-dialog">
+            <div className="passphrase-title">
+              {phraseDialog.flow === "import"    ? "設定をインポート" :
+               phraseDialog.flow === "connect"   ? "VPNに接続" :
+               "VPNに再接続"}
+            </div>
+            <div className="passphrase-hint">
+              {phraseDialog.flow === "import"
+                ? "設定ファイルの暗号化に使用するパスフレーズを入力してください。接続時にも同じパスフレーズが必要です。"
+                : "インポート時に設定したパスフレーズを入力してください。"}
+            </div>
+            <input
+              className={`passphrase-input${phraseDialog.error ? " passphrase-input-error" : ""}`}
+              type="password"
+              value={phraseDialog.value}
+              onChange={(e) =>
+                setPhraseDialog((prev) => ({ ...prev, value: e.target.value, error: null }))
+              }
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handlePhraseConfirm();
+                if (e.key === "Escape") closePhraseDialog();
+              }}
+              autoFocus
+              placeholder="パスフレーズ"
+              autoComplete="off"
+            />
+            {phraseDialog.error && (
+              <div className="passphrase-error">{phraseDialog.error}</div>
+            )}
+            <div className="passphrase-actions">
+              <button className="btn-phrase-cancel" onClick={closePhraseDialog}>
+                キャンセル
+              </button>
+              <button className="btn-phrase-ok" onClick={handlePhraseConfirm}>
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

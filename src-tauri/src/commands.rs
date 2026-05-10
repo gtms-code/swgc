@@ -2,6 +2,11 @@
 //!
 //! # Security invariants enforced here
 //!
+//! - The user's passphrase is accepted only as a transient parameter.  It is
+//!   immediately used to derive PBKDF2 entropy (`crypto::derive_entropy`), then
+//!   zeroized in memory before any further work.  The derived entropy itself is
+//!   `Zeroizing<[u8; 32]>` and is either used directly and dropped, or cached
+//!   in `wireguard::CACHED_ENTROPY` for auto-reconnect.
 //! - Sensitive data (`WgConfig`) is decrypted on-demand and dropped immediately
 //!   after use. `WgConfig` is `ZeroizeOnDrop`, so the private key is overwritten
 //!   with zeros when the struct goes out of scope.
@@ -26,17 +31,16 @@ pub struct StatusResponse {
 }
 
 /// Returns current connection status. Safe to poll frequently; never exposes keys.
+///
+/// The peer endpoint is read directly from the in-memory `TunnelState` so no
+/// passphrase is required.
 #[command]
 pub async fn get_status() -> Result<StatusResponse, AppError> {
     let has_config = config::has_config();
     let is_connected = wireguard::is_connected();
 
-    let peer_endpoint = if is_connected && has_config {
-        config::load_decrypted()
-            .ok()
-            .flatten()
-            .map(|c| c.endpoint.clone())
-        // WgConfig is dropped and zeroed here (ZeroizeOnDrop)
+    let peer_endpoint = if is_connected {
+        wireguard::get_peer_endpoint()
     } else {
         None
     };
@@ -48,13 +52,14 @@ pub async fn get_status() -> Result<StatusResponse, AppError> {
     })
 }
 
-/// Import a WireGuard `.conf` file: read → parse → encrypt → persist → discard.
+/// Import a WireGuard `.conf` file: read → parse → derive entropy → encrypt → persist.
 ///
-/// The plaintext file content and the parsed `WgConfig` (including the private key)
-/// are both zeroized before this function returns. Nothing sensitive is returned
-/// to the frontend.
+/// The passphrase is used to derive PBKDF2 entropy and is zeroized immediately
+/// after derivation.  The plaintext file content and the parsed `WgConfig`
+/// (including the private key) are both zeroized before this function returns.
+/// Nothing sensitive is returned to the frontend.
 #[command]
-pub async fn import_config(file_path: String) -> Result<(), AppError> {
+pub async fn import_config(file_path: String, mut passphrase: String) -> Result<(), AppError> {
     // Reject suspiciously large files before reading them into memory.
     // A valid WireGuard .conf file is never larger than a few hundred bytes.
     const MAX_CONF_BYTES: u64 = 65_536; // 64 KiB
@@ -77,6 +82,7 @@ pub async fn import_config(file_path: String) -> Result<(), AppError> {
         Ok(c) => c,
         Err(e) => {
             content.zeroize(); // zeroize even on parse failure
+            passphrase.zeroize();
             return Err(e);
         }
     };
@@ -85,24 +91,47 @@ pub async fn import_config(file_path: String) -> Result<(), AppError> {
     // only inside `wg_config` on the Rust heap.
     content.zeroize();
 
+    // Derive PBKDF2 entropy from the passphrase, then zeroize the passphrase.
+    let entropy = crate::crypto::derive_entropy(&passphrase);
+    passphrase.zeroize();
+
     // Encrypt and persist. `wg_config` is ZeroizeOnDrop: its private_key
     // field is overwritten when this function returns.
-    config::save_encrypted(&wg_config)?;
+    config::save_encrypted(&wg_config, &entropy)?;
 
-    // `wg_config` is dropped and zeroed here.
+    // `wg_config` and `entropy` are dropped and zeroed here.
     Ok(())
 }
 
 /// Decrypt the stored config (in memory only) and bring up the WireGuard tunnel.
 ///
-/// The `WgConfig` is decrypted, used to configure the driver, then immediately
-/// dropped and zeroed — it does not persist in memory after this call.
+/// The passphrase is used to derive PBKDF2 entropy, which is then used to
+/// decrypt the stored config via DPAPI.  If decryption fails (wrong passphrase),
+/// a user-friendly error is returned.  The passphrase is zeroized before any
+/// I/O and the `WgConfig` is zeroized immediately after the driver call.
+///
+/// The derived entropy is cached in process memory for auto-reconnect.
 #[command]
-pub async fn connect() -> Result<(), AppError> {
-    let wg_config: WgConfig = config::load_decrypted()?
-        .ok_or_else(|| AppError::Config("設定がインポートされていません".into()))?;
+pub async fn connect(mut passphrase: String) -> Result<(), AppError> {
+    let entropy = crate::crypto::derive_entropy(&passphrase);
+    passphrase.zeroize();
 
-    wireguard::connect(&wg_config)?;
+    let wg_config: WgConfig = match config::load_decrypted(&entropy) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return Err(AppError::Config("設定がインポートされていません".into()))
+        }
+        Err(_) => {
+            return Err(AppError::Config(
+                "パスフレーズが正しくありません。\
+                 正しいパスフレーズを入力するか、設定を再インポートしてください。"
+                    .into(),
+            ))
+        }
+    };
+
+    // `entropy` is moved into connect() and cached for auto-reconnect.
+    wireguard::connect(&wg_config, entropy)?;
 
     // `wg_config` (private_key zeroed) is dropped here.
     Ok(())
@@ -125,19 +154,36 @@ pub async fn tunnel_stats() -> Result<Option<wireguard::TunnelStats>, AppError> 
 
 /// Disconnect then immediately reconnect — useful when the WireGuard session
 /// becomes stale (e.g. re-handshake failure after long idle).
+///
+/// Requires the passphrase to re-derive entropy and decrypt the stored config.
 #[command]
-pub async fn force_reconnect() -> Result<(), AppError> {
-    let wg_config: WgConfig = config::load_decrypted()?
-        .ok_or_else(|| AppError::Config("設定がインポートされていません".into()))?;
+pub async fn force_reconnect(mut passphrase: String) -> Result<(), AppError> {
+    let entropy = crate::crypto::derive_entropy(&passphrase);
+    passphrase.zeroize();
+
+    let wg_config: WgConfig = match config::load_decrypted(&entropy) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return Err(AppError::Config("設定がインポートされていません".into()))
+        }
+        Err(_) => {
+            return Err(AppError::Config(
+                "パスフレーズが正しくありません。\
+                 正しいパスフレーズを入力するか、設定を再インポートしてください。"
+                    .into(),
+            ))
+        }
+    };
 
     // Disconnect silently if connected (ignore "not connected" error).
     let _ = wireguard::disconnect();
 
-    wireguard::connect(&wg_config)?;
+    // Re-caches the entropy for subsequent auto-reconnects.
+    wireguard::connect(&wg_config, entropy)?;
     Ok(())
 }
 
-/// Remove the encrypted config from the registry.
+/// Remove the encrypted config from the registry and clear the cached entropy.
 ///
 /// After this call, `has_config()` returns `false` and the tunnel keys can no
 /// longer be recovered by this application. The user must re-import.
@@ -148,5 +194,8 @@ pub async fn delete_config() -> Result<(), AppError> {
             "接続中は設定を削除できません。先に切断してください。".into(),
         ));
     }
+    // Clear cached entropy so the monitor thread cannot attempt reconnection
+    // after the config blob has been removed.
+    wireguard::clear_cached_entropy();
     config::delete_config()
 }

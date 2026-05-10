@@ -331,3 +331,102 @@ button:disabled {
   background: var(--danger);
   color: #fff;
 }
+
+/* ── Passphrase dialog overlay ── */
+
+.passphrase-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  animation: fadeIn 0.15s ease;
+}
+
+.passphrase-dialog {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 22px 24px 20px;
+  width: 310px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.passphrase-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.passphrase-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.passphrase-input {
+  width: 100%;
+  padding: 9px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.passphrase-input:focus {
+  border-color: var(--accent);
+}
+
+.passphrase-input.passphrase-input-error {
+  border-color: var(--danger);
+}
+
+.passphrase-error {
+  font-size: 11px;
+  color: var(--danger);
+  margin-top: -4px;
+}
+
+.passphrase-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.btn-phrase-cancel {
+  flex: 1;
+  padding: 8px 12px;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.btn-phrase-cancel:hover {
+  border-color: var(--text-muted);
+  color: var(--text);
+}
+
+.btn-phrase-ok {
+  flex: 1;
+  padding: 8px 12px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.btn-phrase-ok:hover:not(:disabled) {
+  background: var(--accent);
+  color: #000;
+}

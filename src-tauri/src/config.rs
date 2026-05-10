@@ -4,6 +4,9 @@
 //!
 //! Security properties:
 //! - Only the DPAPI ciphertext is written — plaintext never touches disk.
+//! - The DPAPI entropy is derived from the user's passphrase via PBKDF2 and is
+//!   never stored anywhere.  An attacker with the registry blob must also know
+//!   the passphrase (and be the same Windows user) to decrypt it.
 //! - WgConfig implements ZeroizeOnDrop: private_key and preshared_key are
 //!   overwritten with zeros when the struct is dropped, minimising the window
 //!   during which key material lives in process memory.
@@ -35,16 +38,21 @@ pub struct WgConfig {
 const REG_KEY_PATH: &str = r"Software\SWGC\Config";
 const REG_VALUE_NAME: &str = "EncryptedBlob";
 
-/// Encrypt `config` with DPAPI and write the blob to the Windows Registry.
+/// Encrypt `config` with DPAPI (using `entropy`) and write the blob to the
+/// Windows Registry.
+///
+/// `entropy` must be derived from the user's passphrase via
+/// `crypto::derive_entropy`.  It is never stored — only the opaque DPAPI
+/// ciphertext is written to the registry.
 ///
 /// After this function returns, the caller's `WgConfig` should be dropped
 /// (or will be zeroed automatically when it goes out of scope via `ZeroizeOnDrop`).
-pub fn save_encrypted(config: &WgConfig) -> Result<()> {
+pub fn save_encrypted(config: &WgConfig, entropy: &[u8; 32]) -> Result<()> {
     // Serialise to JSON bytes — plaintext lives in `json` on the heap.
     let mut json = serde_json::to_vec(config)?;
 
     // Encrypt with DPAPI; `json` bytes are consumed as input.
-    let blob = crypto::encrypt(&json)?;
+    let blob = crypto::encrypt(&json, entropy)?;
 
     // Zeroize the plaintext JSON bytes immediately after encryption.
     json.zeroize();
@@ -75,12 +83,16 @@ pub fn save_encrypted(config: &WgConfig) -> Result<()> {
     Ok(())
 }
 
-/// Read the encrypted blob from the registry, decrypt it, and return a `WgConfig`.
+/// Read the encrypted blob from the registry, decrypt it using `entropy`, and
+/// return a `WgConfig`.
 ///
 /// Returns `None` if no config has been imported yet.
+/// Returns `Err` if decryption fails — most commonly because `entropy` was
+/// derived from the wrong passphrase.
+///
 /// The returned `WgConfig` is `ZeroizeOnDrop` — the caller must not hold it
 /// longer than necessary.
-pub fn load_decrypted() -> Result<Option<WgConfig>> {
+pub fn load_decrypted(entropy: &[u8; 32]) -> Result<Option<WgConfig>> {
     #[cfg(windows)]
     {
         use winreg::enums::HKEY_CURRENT_USER;
@@ -98,7 +110,7 @@ pub fn load_decrypted() -> Result<Option<WgConfig>> {
         };
 
         // Decrypt in Rust memory — plaintext never written to disk.
-        let mut plaintext = crypto::decrypt(&raw.bytes)?;
+        let mut plaintext = crypto::decrypt(&raw.bytes, entropy)?;
 
         let config: WgConfig = serde_json::from_slice(&plaintext)
             .map_err(|e| AppError::Config(format!("設定の復号後パースに失敗: {e}")))?;
@@ -114,8 +126,24 @@ pub fn load_decrypted() -> Result<Option<WgConfig>> {
 }
 
 /// Returns `true` if an encrypted config blob exists in the registry.
+///
+/// This check does NOT require the passphrase — it only verifies that the
+/// registry key and value are present, not that the stored blob is decryptable.
 pub fn has_config() -> bool {
-    matches!(load_decrypted(), Ok(Some(_)))
+    #[cfg(windows)]
+    {
+        use winreg::enums::HKEY_CURRENT_USER;
+        use winreg::RegKey;
+
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if let Ok(key) = hkcu.open_subkey(REG_KEY_PATH) {
+            return key.get_raw_value(REG_VALUE_NAME).is_ok();
+        }
+        false
+    }
+
+    #[cfg(not(windows))]
+    false
 }
 
 /// Delete the stored config from the registry.
@@ -271,17 +299,26 @@ mod tests {
         let original_key = cfg.private_key.clone();
         let original_endpoint = cfg.endpoint.clone();
 
+        let entropy = crate::crypto::derive_entropy("registry-test-passphrase");
+
         // Save encrypted
-        save_encrypted(&cfg).expect("save_encrypted failed");
+        save_encrypted(&cfg, &entropy).expect("save_encrypted failed");
 
         // Load and decrypt
-        let loaded = load_decrypted()
+        let loaded = load_decrypted(&entropy)
             .expect("load_decrypted returned Err")
             .expect("load_decrypted returned None");
 
         assert_eq!(loaded.private_key, original_key);
         assert_eq!(loaded.endpoint, original_endpoint);
         assert_eq!(loaded.persistent_keepalive, Some(25));
+
+        // Wrong passphrase must fail
+        let bad_entropy = crate::crypto::derive_entropy("wrong-passphrase");
+        assert!(
+            load_decrypted(&bad_entropy).is_err(),
+            "wrong passphrase must not decrypt"
+        );
 
         // Clean up
         delete_config().expect("delete_config failed");

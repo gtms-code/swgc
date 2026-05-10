@@ -20,31 +20,47 @@ export async function getStatus(): Promise<StatusResponse | null> {
 }
 
 /**
- * Open a file-picker limited to `.conf` files, then send the selected
- * path to the backend for immediate encryption. Returns `true` on success.
- * Throws a descriptive string on error.
+ * Open a file-picker limited to `.conf` files and return the selected path,
+ * or `null` if the user cancelled.
+ *
+ * Separated from `importConfig` so the caller can collect a passphrase before
+ * sending the path to the backend.
  */
-export async function importConfig(): Promise<boolean> {
-  // Tauri v2: single-select returns `string | null`
+export async function selectConfFile(): Promise<string | null> {
   const selected = await open({
     title: "WireGuard設定ファイルを選択",
     filters: [{ name: "WireGuard Config", extensions: ["conf"] }],
     multiple: false,
   });
 
-  if (!selected) return false; // user cancelled
-
-  const filePath = Array.isArray(selected) ? selected[0] : selected;
-
-  // Backend reads the file, encrypts it, then discards the plaintext.
-  // The filePath itself is not sensitive — only its contents are.
-  await invoke("import_config", { filePath });
-  return true;
+  if (!selected) return null;
+  return Array.isArray(selected) ? selected[0] : selected;
 }
 
-/** Bring the WireGuard tunnel up. Throws a string on error. */
-export async function connect(): Promise<void> {
-  await invoke("connect");
+/**
+ * Send the selected `.conf` path and passphrase to the backend for encryption.
+ *
+ * The backend reads the file, derives DPAPI entropy from `passphrase` via
+ * PBKDF2, encrypts the config, and discards all plaintext. The passphrase
+ * itself is never stored — neither on disk nor in the registry.
+ *
+ * Throws a descriptive string on error.
+ */
+export async function importConfig(filePath: string, passphrase: string): Promise<void> {
+  await invoke("import_config", { filePath, passphrase });
+}
+
+/**
+ * Bring the WireGuard tunnel up.
+ *
+ * `passphrase` is used backend-side to derive DPAPI entropy (PBKDF2) and
+ * decrypt the stored config. It is zeroized in Rust memory immediately after
+ * entropy derivation and is never stored.
+ *
+ * Throws a string on error (including wrong-passphrase errors).
+ */
+export async function connect(passphrase: string): Promise<void> {
+  await invoke("connect", { passphrase });
 }
 
 /** Tear down the WireGuard tunnel. Throws a string on error. */
@@ -75,8 +91,10 @@ export async function getTunnelStats(): Promise<TunnelStats | null> {
 
 /**
  * Disconnect then immediately reconnect — use when the session is stale.
+ *
+ * Requires the passphrase for the same reason as `connect`.
  * Throws a string on error.
  */
-export async function forceReconnect(): Promise<void> {
-  await invoke("force_reconnect");
+export async function forceReconnect(passphrase: string): Promise<void> {
+  await invoke("force_reconnect", { passphrase });
 }

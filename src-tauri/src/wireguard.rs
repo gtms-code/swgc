@@ -68,6 +68,9 @@ struct TunnelState {
     _lib: libloading::Library,
     #[allow(dead_code)]
     interface_name: String,
+    /// Peer endpoint string (e.g. "1.2.3.4:51820") stored for `get_peer_endpoint()`.
+    /// Exposed via IPC so the frontend can display it without needing DPAPI access.
+    peer_endpoint: String,
     /// Signal for the background monitor thread to stop (set true on disconnect).
     monitor_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
@@ -79,6 +82,31 @@ struct TunnelState {
 //   Arc<AtomicBool>— Send + Sync
 
 static TUNNEL: Mutex<Option<TunnelState>> = Mutex::new(None);
+
+// ── Entropy cache for auto-reconnect ──────────────────────────────────────
+
+/// PBKDF2-derived entropy cached after a successful `connect()` call.
+/// The monitor thread reads this to decrypt the stored config when
+/// auto-reconnecting — without requiring the user to re-enter a passphrase.
+/// Cleared only when the user deletes the stored config.
+static CACHED_ENTROPY: Mutex<Option<Zeroizing<[u8; 32]>>> = Mutex::new(None);
+
+/// Store `entropy` in the process-wide cache.  Called by `connect()`.
+pub fn set_cached_entropy(entropy: Zeroizing<[u8; 32]>) {
+    *CACHED_ENTROPY.lock().unwrap() = Some(entropy);
+}
+
+/// Clear the cached entropy.  Called by `delete_config` command so the
+/// monitor thread cannot reconnect after the config has been erased.
+pub fn clear_cached_entropy() {
+    *CACHED_ENTROPY.lock().unwrap() = None;
+}
+
+/// Return a copy of the cached entropy, or `None` if not yet set.
+fn get_cached_entropy() -> Option<Zeroizing<[u8; 32]>> {
+    let guard = CACHED_ENTROPY.lock().unwrap();
+    guard.as_ref().map(|e| Zeroizing::new(**e))
+}
 
 // ── Background keepalive monitor ──────────────────────────────────────────
 
@@ -213,12 +241,24 @@ fn monitor_thread(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
             "[monitor] 自動再接続を試みます (試行 #{reconnect_attempts}, バックオフ={backoff_secs}s)"
         ));
 
-        // Load the stored config via DPAPI.
-        let cfg = match crate::config::load_decrypted() {
+        // Retrieve the cached entropy (derived from the user's passphrase at
+        // connect time) so we can decrypt the stored config without prompting.
+        let entropy = match get_cached_entropy() {
+            Some(e) => e,
+            None => {
+                diag_log(&format!(
+                    "[monitor #{count}] キャッシュされたエントロピーがありません — 再接続できません"
+                ));
+                if interruptible_sleep(backoff_secs, &stop) { return; }
+                continue;
+            }
+        };
+
+        // Load the stored config via DPAPI using the cached entropy.
+        let cfg = match crate::config::load_decrypted(&entropy) {
             Ok(Some(c)) => c,
             Ok(None) => {
                 diag_log("[monitor] 設定が見つかりません — 再接続できません");
-                // Nothing we can do; wait a long time before retrying.
                 if interruptible_sleep(backoff_secs, &stop) { return; }
                 continue;
             }
@@ -743,39 +783,6 @@ fn connect_with_stop(
     iface.PrivateKey.zeroize();
     peer.PresharedKey.zeroize();
 
-    // Full hex dump for verification — debug builds only.
-    // These buffers contain the private key and PSK in plaintext; never log them
-    // in release builds.
-    #[cfg(debug_assertions)]
-    {
-        let hex_iface: String = buf[..iface_size].iter().map(|b| format!("{b:02x} ")).collect();
-        diag!("  WIREGUARD_INTERFACE[0..{iface_size}]: {hex_iface}");
-
-        let hex_peer: String = buf[iface_size..iface_size+peer_size]
-            .iter().map(|b| format!("{b:02x} ")).collect();
-        diag!("  WIREGUARD_PEER[{iface_size}..{}]: {hex_peer}", iface_size+peer_size);
-
-        // Decode peer fields for readability
-        let p = &buf[iface_size..];
-        let flags_p = u32::from_le_bytes([p[0],p[1],p[2],p[3]]);
-        // PersistentKeepalive at offset 72..74
-        let ka = u16::from_le_bytes([p[72],p[73]]);
-        // Endpoint at offset 76: family(2)+port(2)+addr(4) for IPv4
-        let ep_family = u16::from_le_bytes([p[76],p[77]]);
-        let ep_port_be = u16::from_be_bytes([p[78],p[79]]);
-        let ep_ip = &p[80..84];
-        diag!("  peer.Flags=0x{flags_p:08x} Keepalive={ka}");
-        diag!("  peer.Endpoint: family={ep_family} port={ep_port_be} ip={}.{}.{}.{}",
-            ep_ip[0], ep_ip[1], ep_ip[2], ep_ip[3]);
-
-        for i in 0..allowed_ips.len() {
-            let base = iface_size + peer_size + i * aip_size;
-            let hex_aip: String = buf[base..base+aip_size]
-                .iter().map(|b| format!("{b:02x} ")).collect();
-            diag!("  AllowedIP[{i}]: {hex_aip}");
-        }
-    }
-
     // ── 4. Create adapter ────────────────────────────────────────────────
     diag!("step 4: WireGuardCreateAdapter(\"SWGC\")");
     let adapter_name = to_wide_null("SWGC");
@@ -969,6 +976,7 @@ fn connect_with_stop(
         adapter: AdapterHandle(adapter),
         _lib: lib,
         interface_name: "SWGC".into(),
+        peer_endpoint: config.endpoint.clone(),
         monitor_stop,
     });
 
@@ -978,9 +986,19 @@ fn connect_with_stop(
 
 // ── connect (public) ──────────────────────────────────────────────────────
 
-/// Bring up a WireGuard tunnel.  Creates the monitor stop-signal, calls
-/// `connect_with_stop`, then spawns the background monitor thread.
-pub fn connect(config: &WgConfig) -> Result<()> {
+/// Bring up a WireGuard tunnel.
+///
+/// `entropy` must be the PBKDF2-derived value from the user's passphrase
+/// (via `crypto::derive_entropy`).  It is cached in process memory so the
+/// background monitor thread can auto-reconnect without re-prompting.
+///
+/// Call order: cache entropy → call `connect_with_stop` → spawn monitor thread.
+pub fn connect(config: &WgConfig, entropy: Zeroizing<[u8; 32]>) -> Result<()> {
+    // Cache entropy BEFORE connect_with_stop so the monitor thread has it
+    // available immediately even if the first connect succeeds and a
+    // reconnect is triggered soon after.
+    set_cached_entropy(entropy);
+
     let monitor_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     connect_with_stop(config, monitor_stop.clone(), false)?;
 
@@ -991,6 +1009,17 @@ pub fn connect(config: &WgConfig) -> Result<()> {
         .ok(); // spawn failure is non-fatal
 
     Ok(())
+}
+
+/// Returns the peer endpoint string stored when the tunnel was last brought up,
+/// or `None` if no tunnel is currently active.
+///
+/// Used by `get_status` so the frontend can display the endpoint without
+/// requiring DPAPI access (no passphrase needed).
+pub fn get_peer_endpoint() -> Option<String> {
+    TUNNEL.lock().unwrap()
+        .as_ref()
+        .map(|s| s.peer_endpoint.clone())
 }
 
 // ── reconnect (called from monitor thread) ────────────────────────────────
