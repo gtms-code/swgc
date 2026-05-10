@@ -36,51 +36,52 @@ Windows向けのセキュアなWireGuardクライアントです。[Tauri v2](ht
 
 ## 使い方
 
-### 準備
+ビルド済みの配布バイナリはありません。ソースからビルドして実行してください。
 
-1. **[WireGuard for Windows](https://www.wireguard.com/install/)** をインストールします
-   - SWGCはこのインストールで配置される `wireguard.dll` を使用します
-   - WireGuard for Windows のトンネル機能自体は使用しません（DLLのみ必要です）
+### Step 1 — 前提ソフトをインストール
 
-### 接続
+| ソフト | 用途 |
+|---|---|
+| [WireGuard for Windows](https://www.wireguard.com/install/) | `wireguard.dll` の取得（接続に必須） |
+| [Rust (stable)](https://rustup.rs/) | Rustバックエンドのビルド |
+| [Node.js 18以上](https://nodejs.org/) | フロントエンドのビルド |
+| [Tauri 前提条件](https://tauri.app/start/prerequisites/) | WebView2・Visual Studio Build Tools |
 
-2. リリースページから `swgc_x.x.x_x64-setup.exe` をダウンロードしてインストール
-3. **管理者として**起動
-4. **「設定をインポート (.conf)」** ボタンから WireGuard 設定ファイル (`.conf`) を選択
-5. **「接続」** ボタンをクリック
-6. ハンドシェイクが確立されると接続時間・TX/RXが表示されます
+> WireGuard for Windows のトンネル機能自体は使用しません。`wireguard.dll` を
+> `C:\Program Files\WireGuard\` に配置するためにインストールします。
 
-> **ヒント**: セキュリティのため、`.conf` の `Endpoint` には固定IPアドレスの使用を推奨します。
+### Step 2 — ビルド
 
-## ビルド方法
-
-### 前提条件
-
-- [Rust](https://rustup.rs/) (stable)
-- [Node.js](https://nodejs.org/) 18以上
-- [Tauri CLI](https://tauri.app/start/prerequisites/)
-- [WireGuard for Windows](https://www.wireguard.com/install/) （実行時にDLLが必要）
+管理者権限のPowerShellで実行してください。
 
 ```powershell
-# 依存関係インストール
+git clone https://github.com/gtms-code/swgc.git
+cd swgc
 npm install
-
-# 開発モードで起動 (管理者権限のターミナルで実行)
-npm run tauri dev
-
-# リリースビルド
 npm run tauri build
 ```
 
-> **wireguard.dll について**
->
-> このリポジトリには `wireguard.dll` を含んでいません。
-> 実行時に `C:\Program Files\WireGuard\wireguard.dll`（WireGuard for Windows
-> のインストール先）を自動的に検索します。見つからない場合は起動時にエラーになります。
->
-> 独自に wireguard-nt をビルドしたDLLを使う場合は、実行ファイルと同じフォルダに
-> 配置してください（Authenticodeで署名されている必要があります）。
-> 詳細は [wireguard-nt](https://git.zx2c4.com/wireguard-nt) を参照してください。
+ビルドが完了すると以下にexeが生成されます：
+
+```
+src-tauri\target\release\swgc.exe
+```
+
+### Step 3 — 実行と接続
+
+1. `src-tauri\target\release\swgc.exe` を**管理者として実行**
+2. **「設定をインポート (.conf)」** ボタンから WireGuard 設定ファイルを選択
+3. **「接続」** ボタンをクリック
+4. ハンドシェイクが確立されると接続時間・TX/RXが表示されます
+
+> **ヒント**: セキュリティのため、`.conf` の `Endpoint` には固定IPアドレスの使用を推奨します。
+
+## 開発
+
+```powershell
+# 開発モードで起動（ホットリロード有効、管理者権限のターミナルで実行）
+npm run tauri dev
+```
 
 ## アーキテクチャ
 
