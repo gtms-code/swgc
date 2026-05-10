@@ -12,7 +12,7 @@ Windows向けのセキュアなWireGuardクライアントです。[Tauri v2](ht
 
 ## スクリーンショット
 
-> 接続中の状態 (ハンドシェイク・TX/RX表示)
+![SWGC 接続中の状態](docs/swgc.png)
 
 ## 必要環境
 
