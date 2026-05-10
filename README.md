@@ -1,6 +1,6 @@
-# SWGC — Secure WireGuard Client
+# SWGC — Secure WireGuard Client (試作版)
 
-Windows向けのセキュアなWireGuardクライアントです。[Tauri v2](https://tauri.app/) + Rust + React で実装されており、秘密鍵をディスクに平文で保存しないことを最大の特徴としています。
+Windows向けのセキュアなWireGuardクライアントです。[Tauri v2](https://tauri.app/) + Rust + React で実装されており、秘密鍵をディスクに平文で保存しないことと、秘密鍵を画面に表示しないことを特徴としています。
 
 ## 特徴
 
@@ -69,10 +69,10 @@ src-tauri\target\release\swgc.exe
 
 ### Step 3 — 実行と接続
 
-1. `src-tauri\target\release\swgc.exe` を**管理者として実行**
-2. **「設定をインポート (.conf)」** ボタンから WireGuard 設定ファイルを選択
-3. **「接続」** ボタンをクリック
-4. ハンドシェイクが確立されると接続時間・TX/RXが表示されます
+1. `src-tauri\target\release\swgc.exe` を**管理者として実行**。
+2. **「設定をインポート (.conf)」** ボタンから WireGuard 設定ファイルを選択。その際に、任意のパスコードを設定。
+3. **「接続」** ボタンをクリック。そして、2.で設定したパスコードを入力。
+4. ハンドシェイクが確立されると接続時間・TX/RXが表示されます。
 
 > **ヒント**: セキュリティのため、`.conf` の `Endpoint` には固定IPアドレスの使用を推奨します。
 
