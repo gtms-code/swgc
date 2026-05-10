@@ -238,15 +238,118 @@ fn dll_paths() -> Vec<std::path::PathBuf> {
     paths
 }
 
-/// Load `wireguard.dll` from the first path that exists.
+/// Verify that the DLL at `path` carries a valid Authenticode signature.
+///
+/// Uses `WinVerifyTrust` (wintrust.dll) to confirm:
+/// 1. The file content matches the embedded signature (tamper detection).
+/// 2. The code-signing certificate chains to a Windows-trusted root CA.
+///
+/// Revocation checks are skipped (`WTD_REVOKE_NONE`) so the app functions
+/// offline.  This accepts potentially revoked certificates, which is an
+/// acceptable trade-off for a bundled utility DLL on a device that has
+/// already passed Windows Update and driver signing enforcement.
+///
+/// Why this matters: even though SWGC requires admin to run, the DLL next to
+/// the executable can be in a user-writable location (e.g. the user runs the
+/// app directly from their Downloads folder before installing it).  An
+/// attacker with user-level access could plant a malicious unsigned DLL there.
+/// Authenticode verification catches that case.
+#[cfg(windows)]
+fn verify_dll_signature(path: &std::path::Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use winapi::shared::guiddef::GUID;
+    use winapi::shared::minwindef::DWORD;
+    use winapi::um::wintrust::{
+        WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY,
+        WTD_UI_NONE, WINTRUST_DATA, WINTRUST_FILE_INFO,
+        WinVerifyTrust,
+    };
+
+    // {00AAC56B-CD44-11D0-8CC2-00C04FC295EE}  WINTRUST_ACTION_GENERIC_VERIFY_V2
+    let mut action_guid = GUID {
+        Data1: 0x00AAC56B,
+        Data2: 0xCD44,
+        Data3: 0x11D0,
+        Data4: [0x8C, 0xC2, 0x00, 0xC0, 0x4F, 0xC2, 0x95, 0xEE],
+    };
+
+    // Build a NUL-terminated UTF-16 path for the Win32 API.
+    let wide_path: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut file_info = WINTRUST_FILE_INFO {
+        cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as DWORD,
+        pcwszFilePath: wide_path.as_ptr(),
+        hFile: std::ptr::null_mut(),
+        pgKnownSubject: std::ptr::null_mut(),
+    };
+
+    // SAFETY: zeroed() is valid for a C struct that will be immediately
+    // populated before passing to a Win32 API.
+    let mut trust_data: WINTRUST_DATA = unsafe { std::mem::zeroed() };
+    trust_data.cbStruct          = std::mem::size_of::<WINTRUST_DATA>() as DWORD;
+    trust_data.dwUIChoice        = WTD_UI_NONE;      // no dialogs
+    trust_data.fdwRevocationChecks = WTD_REVOKE_NONE; // offline-safe
+    trust_data.dwUnionChoice     = WTD_CHOICE_FILE;
+    trust_data.dwStateAction     = WTD_STATEACTION_VERIFY;
+    // SAFETY: union field — we set dwUnionChoice = WTD_CHOICE_FILE above.
+    unsafe { *trust_data.u.pFile_mut() = &mut file_info as *mut _; }
+
+    // With WTD_UI_NONE the HWND is ignored; null is documented as equivalent
+    // to INVALID_HANDLE_VALUE when no UI is displayed.
+    let hwnd = std::ptr::null_mut();
+
+    let status = unsafe {
+        WinVerifyTrust(hwnd, &mut action_guid, &mut trust_data as *mut _ as *mut _)
+    };
+
+    // Always release internal WinVerifyTrust state even if verification failed.
+    trust_data.dwStateAction = WTD_STATEACTION_CLOSE;
+    unsafe {
+        WinVerifyTrust(hwnd, &mut action_guid, &mut trust_data as *mut _ as *mut _);
+    }
+
+    if status == 0 {
+        // ERROR_SUCCESS: signature is present, valid, and trusted.
+        diag_log(&format!("  DLL署名検証OK: {}", path.display()));
+        Ok(())
+    } else {
+        // Common non-zero HRESULT values:
+        //   0x800B0100 TRUST_E_NOSIGNATURE       — 署名なし
+        //   0x800B0101 TRUST_E_BADDIGEST          — ファイルが改ざんされている
+        //   0x800B010A TRUST_E_SUBJECT_NOT_TRUSTED — 信頼されていない署名者
+        //   0x800B0109 CERT_E_UNTRUSTEDROOT        — ルートCAが信頼されていない
+        Err(AppError::WireGuard(format!(
+            "wireguard.dll の署名検証に失敗しました (HRESULT=0x{:08X}): {:?}\n\
+             未署名または改ざんされた DLL は読み込まれません。\
+             公式の WireGuard または wireguard-nt のバイナリをご使用ください。",
+            status as u32,
+            path
+        )))
+    }
+}
+
+/// Load `wireguard.dll` from the first path that exists and passes
+/// Authenticode signature verification.
 /// Returns (Library, path_used).
 unsafe fn load_dll() -> Result<(libloading::Library, std::path::PathBuf)> {
     for path in dll_paths() {
-        if path.exists() {
-            let lib = libloading::Library::new(&path)
-                .map_err(|e| AppError::WireGuard(format!("DLLロード失敗 ({path:?}): {e}")))?;
-            return Ok((lib, path));
+        if !path.exists() {
+            continue;
         }
+
+        // Verify Authenticode signature before mapping the DLL into process
+        // memory.  This catches unsigned or tampered replacements even when
+        // the DLL is placed in a nominally trusted directory.
+        #[cfg(windows)]
+        verify_dll_signature(&path)?;
+
+        let lib = libloading::Library::new(&path)
+            .map_err(|e| AppError::WireGuard(format!("DLLロード失敗 ({path:?}): {e}")))?;
+        return Ok((lib, path));
     }
     Err(AppError::WireGuard(
         "wireguard.dll が見つかりません。アプリと同じフォルダに配置してください。".into(),

@@ -32,6 +32,8 @@ winapi = { version = "0.3", features = [
     "minwindef",
     "basetsd",
     "guiddef",
+    "windef",
+    "wintrust",
 ] }
 winreg = "0.52"
 libloading = "0.8"
