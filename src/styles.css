@@ -1,0 +1,333 @@
+:root {
+  --bg: #0f1117;
+  --surface: #1a1d27;
+  --border: #2a2d3e;
+  --accent: #4ade80;
+  --accent-dim: #166534;
+  --danger: #f87171;
+  --danger-dim: #7f1d1d;
+  --text: #e2e8f0;
+  --text-muted: #64748b;
+  --radius: 8px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.app {
+  width: 360px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.app-header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--text);
+}
+
+.app-header .subtitle {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.shield-icon {
+  width: 36px;
+  height: 36px;
+  color: var(--accent);
+}
+
+.status-section {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot.connected {
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+  animation: pulse 2s infinite;
+}
+
+.status-dot.disconnected {
+  background: var(--text-muted);
+}
+
+.status-dot.connecting {
+  background: #fbbf24;
+  box-shadow: 0 0 8px #fbbf24;
+  animation: pulse 1s infinite;
+}
+
+.status-dot.stale {
+  background: #f97316;  /* orange — session aging */
+  box-shadow: 0 0 6px #f97316;
+}
+
+.status-dot.stale-urgent {
+  background: #ef4444;  /* red — session likely expired */
+  box-shadow: 0 0 8px #ef4444;
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.status-info {
+  flex: 1;
+}
+
+.status-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.status-label.connected { color: var(--accent); }
+.status-label.disconnected { color: var(--text-muted); }
+.status-label.connecting { color: #fbbf24; }
+.status-label.stale { color: #f97316; }
+.status-label.stale-urgent { color: #ef4444; }
+
+.status-detail {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.status-detail.warn {
+  color: #fbbf24;  /* amber — handshake aging */
+}
+.status-detail.warn-urgent {
+  color: #ef4444;  /* red — session likely expired */
+  font-weight: 600;
+}
+
+.no-config-notice {
+  background: rgba(251, 191, 36, 0.1);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: var(--radius);
+  padding: 12px;
+  font-size: 12px;
+  color: #fbbf24;
+  text-align: center;
+}
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+button {
+  border: none;
+  border-radius: var(--radius);
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-connect {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+.btn-connect:hover:not(:disabled) {
+  background: var(--accent);
+  color: #000;
+}
+
+.btn-disconnect {
+  background: var(--danger-dim);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+}
+
+.btn-disconnect:hover:not(:disabled) {
+  background: var(--danger);
+  color: #fff;
+}
+
+.btn-reconnect {
+  background: rgba(249, 115, 22, 0.15);
+  color: #f97316;
+  border: 1px solid #f97316;
+}
+
+.btn-reconnect:hover:not(:disabled) {
+  background: #f97316;
+  color: #fff;
+}
+
+.btn-import {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.btn-import:hover:not(:disabled) {
+  border-color: var(--text-muted);
+  color: var(--text);
+}
+
+.footer {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-align: center;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.error-message {
+  background: rgba(248, 113, 113, 0.1);
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--danger);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  animation: fadeIn 0.2s ease;
+}
+
+.error-dismiss {
+  font-size: 10px;
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Delete button ── */
+.btn-delete {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px dashed var(--border);
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.btn-delete:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
+  opacity: 1;
+}
+
+/* ── Delete confirmation box ── */
+.confirm-box {
+  background: rgba(248, 113, 113, 0.07);
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: fadeIn 0.15s ease;
+}
+
+.confirm-text {
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-confirm-cancel {
+  flex: 1;
+  padding: 7px 12px;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.btn-confirm-cancel:hover {
+  border-color: var(--text-muted);
+  color: var(--text);
+}
+
+.btn-confirm-delete {
+  flex: 1;
+  padding: 7px 12px;
+  background: var(--danger-dim);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.btn-confirm-delete:hover {
+  background: var(--danger);
+  color: #fff;
+}

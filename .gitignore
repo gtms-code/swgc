@@ -1,0 +1,24 @@
+# ── Sensitive files ───────────────────────────────────────────────────────
+# WireGuard .conf files contain private keys — NEVER commit these.
+*.conf
+
+# ── Build artifacts ───────────────────────────────────────────────────────
+# Rust/Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# Frontend
+node_modules/
+dist/
+
+# ── OS / Editor ───────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.user
+.vscode/settings.json
+
+# ── Claude Code session data ──────────────────────────────────────────────
+.claude/
+
+# ── Debug logs ────────────────────────────────────────────────────────────
+*.log
