@@ -137,10 +137,16 @@ pub async fn connect(mut passphrase: String) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Tear down the WireGuard tunnel.
+/// Tear down the WireGuard tunnel and clear the in-memory entropy cache.
+///
+/// Clearing the entropy means the monitor thread can no longer auto-reconnect
+/// after an explicit user disconnect, which matches the expected behaviour:
+/// the next `connect()` call will require the passphrase again.
 #[command]
 pub async fn disconnect() -> Result<(), AppError> {
-    wireguard::disconnect()
+    wireguard::disconnect()?;
+    wireguard::clear_cached_entropy();
+    Ok(())
 }
 
 /// Read live WireGuard peer statistics from the kernel driver.

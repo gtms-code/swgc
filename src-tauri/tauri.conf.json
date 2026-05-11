@@ -39,9 +39,5 @@
       "timestampUrl": ""
     }
   },
-  "plugins": {
-    "shell": {
-      "open": false
-    }
-  }
+  "plugins": {}
 }
