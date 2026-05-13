@@ -924,7 +924,56 @@ fn connect_with_stop(
         }
     }
 
-    // ── 9. Readback: verify driver stored the configuration ───────────────
+    // ── 9. Configure DNS servers from .conf DNS = line ───────────────────
+    // Set the VPN-provided DNS server(s) on the WireGuard interface so that
+    // DNS queries from this device are resolved via the VPN tunnel.
+    //
+    // Note: this does NOT affect endpoint hostname resolution during connect /
+    // auto-reconnect — those happen before the tunnel is established and
+    // therefore use the system (pre-VPN) DNS.  Setting DNS here ensures that
+    // traffic *through* the tunnel uses the correct resolver.
+    diag!("step 9: configuring DNS");
+    if let Some(ref dns_str) = config.dns {
+        let dns_servers: Vec<&str> = dns_str
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        for (idx, dns_ip) in dns_servers.iter().enumerate() {
+            // Determine address family to pick the right netsh sub-command.
+            let af = if dns_ip.parse::<std::net::Ipv6Addr>().is_ok() {
+                "ipv6"
+            } else {
+                "ipv4"
+            };
+
+            let args: Vec<&str> = if idx == 0 {
+                // Primary DNS: use "set dnsservers … static … primary validate=no"
+                vec!["interface", af, "set", "dnsservers",
+                     &iface_id, "static", dns_ip, "primary", "validate=no"]
+            } else {
+                // Secondary / tertiary: use "add dnsservers … validate=no"
+                vec!["interface", af, "add", "dnsservers",
+                     &iface_id, dns_ip, "validate=no"]
+            };
+
+            let result = std::process::Command::new("netsh").args(&args).output();
+            match result {
+                Ok(out) => diag!(
+                    "  netsh DNS[{idx}] {dns_ip} ({af}): exit={} out={} err={}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stdout).trim(),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+                Err(e) => diag!("  netsh DNS[{idx}] {dns_ip} 失敗: {e}"),
+            }
+        }
+    } else {
+        diag!("  .conf に DNS 行なし — スキップ");
+    }
+
+    // ── 10. Readback: verify driver stored the configuration ──────────────
     diag!("step 9: WireGuardGetConfiguration readback");
     unsafe {
         if let Ok(fn_get_cfg) = lib.get::<FnWireGuardGetConfiguration>(
@@ -969,7 +1018,7 @@ fn connect_with_stop(
         }
     }
 
-    // ── 10. Save state ────────────────────────────────────────────────────
+    // ── 11. Save state ────────────────────────────────────────────────────
     // The monitor_stop Arc is provided by the caller (connect() or reconnect_for_monitor).
     // We intentionally do NOT spawn a new monitor thread here — the caller handles that.
     *guard = Some(TunnelState {
